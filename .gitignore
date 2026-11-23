@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Captured scan data (large / personal)
+dataset/*
+!dataset/camera_intrinsic.json
+
+# Generated meshes / point clouds
+*.ply
+*.bag
