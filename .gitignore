@@ -4,17 +4,15 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+build/
+dist/
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# Captured scan data (large / personal)
-dataset/*
-!dataset/camera_intrinsic.json
+# Captures et modèles (volumineux, personnels)
 datasets/
-
-# Generated meshes / point clouds
 *.ply
 *.stl
 *.bag
