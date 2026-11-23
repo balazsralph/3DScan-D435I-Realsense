@@ -1,6 +1,7 @@
 """Panneau des datasets : liste avec vignettes, aperçu image par image, lancement de la construction 3D."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -22,17 +23,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..dataset import Dataset, DatasetError, read_frame, thumbnail
+from ..dataset import Dataset, DatasetError, load_dataset, read_frame, thumbnail
 from ..depth import colorize_depth, format_distance
 from ..profiles import DEFAULT_QUALITY, PROFILES, QUALITIES
 from ..reconstruction.pipeline import BuildOptions
 from . import theme
 from .widgets import ImageView, SegmentedControl, bgr_to_qimage, hline
 
-THUMB_W, THUMB_H = 104, 59
+THUMB_W, THUMB_H = 88, 54
 MONTHS = ("janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.")
 PROFILE_ACCENTS = {"objet_petit": theme.AMBER, "objet": theme.AMBER, "salle": theme.VIOLET}
-FORMAT_LABELS = {"scanner3d": "Scanner 3D", "scan3d": "scan3d (importé)", "open3d": "Ancien format Open3D"}
+FORMAT_LABELS = {"scanner3d": "Scanner 3D", "scan3d": "scan3d (importé)", "open3d": "Format Open3D",
+                 "fusion": "Fusion de datasets"}
 
 
 def nice_date(ds: Dataset) -> str:
@@ -71,13 +73,20 @@ def rounded_pixmap(image: QImage, size: QSize, radius: float = 7) -> QPixmap:
 class DatasetItem(QWidget):
     """Ligne de la liste : vignette, date, type, nombre d'images, état du modèle."""
 
-    def __init__(self, ds: Dataset, thumb: QImage | None, parent: QWidget | None = None) -> None:
+    def __init__(self, ds: Dataset, thumb: QImage | None, checked: bool = False,
+                 on_check: Callable[[Path, bool], None] | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 8, 10, 8)
         layout.setSpacing(10)
+        self.check = QCheckBox()
+        self.check.setToolTip("Cocher pour fusionner ce dataset avec d'autres")
+        self.check.setChecked(checked)
+        if on_check is not None:
+            self.check.toggled.connect(lambda on: on_check(ds.path, on))
+        layout.addWidget(self.check)
         pic = QLabel()
         pic.setFixedSize(THUMB_W, THUMB_H)
         if thumb is not None:
@@ -91,7 +100,11 @@ class DatasetItem(QWidget):
         title.setStyleSheet("font-weight: 700;")
         profile = PROFILES.get(ds.profile_id)
         accent = PROFILE_ACCENTS.get(ds.profile_id, theme.MUTED)
-        kind = QLabel(f"{profile.title if profile else ds.profile_id}  ·  {ds.frame_count()} images")
+        if ds.fmt == "fusion":
+            kind_text = f"Fusion · {len(ds.meta.get('merged') or ds.meta.get('sources', []))} datasets"
+        else:
+            kind_text = f"{profile.title if profile else ds.profile_id}  ·  {ds.frame_count()} images"
+        kind = QLabel(kind_text)
         kind.setStyleSheet(f"color: {accent}; font-size: 9pt; font-weight: 600;")
         info = ds.build_info()
         if info:
@@ -117,6 +130,7 @@ class DatasetPanel(QWidget):
     show_model_requested = Signal(object)         # Dataset
     add_folder_requested = Signal()
     refresh_requested = Signal()
+    merge_requested = Signal(object)              # list[Dataset]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -130,6 +144,7 @@ class DatasetPanel(QWidget):
         self._frames: list = []
         self._building = False
         self._blocked: str | None = None
+        self._checked: set[Path] = set()
         self._preview_timer = QTimer(self, singleShot=True, interval=60)
         self._preview_timer.timeout.connect(self._load_preview)
 
@@ -145,6 +160,7 @@ class DatasetPanel(QWidget):
         self.empty.setObjectName("Muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.empty, 1)
+        root.addWidget(self._fusion_bar())
         root.addWidget(hline())
         self.details = self._details()
         root.addWidget(self.details)
@@ -171,6 +187,54 @@ class DatasetPanel(QWidget):
         row.addWidget(refresh)
         row.addWidget(add)
         return row
+
+    def _fusion_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("Card")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 6, 6, 6)
+        self.fusion_label = QLabel("")
+        self.fusion_label.setObjectName("Muted")
+        clear = QPushButton("Effacer")
+        clear.setObjectName("Ghost")
+        clear.clicked.connect(self.clear_checked)
+        self.fusion_button = QPushButton("Fusionner")
+        self.fusion_button.setObjectName("Primary")
+        self.fusion_button.setToolTip("Recale les modèles cochés entre eux et calcule une surface unique et étanche\n"
+                                      "(ex. dessus puis dessous d'un objet retourné, salle en plusieurs passages).")
+        self.fusion_button.clicked.connect(self._on_merge)
+        row.addWidget(self.fusion_label, 1)
+        row.addWidget(clear)
+        row.addWidget(self.fusion_button)
+        self.fusion_bar = bar
+        bar.hide()
+        return bar
+
+    def _on_check(self, path: Path, on: bool) -> None:
+        (self._checked.add if on else self._checked.discard)(path)
+        self._update_fusion_bar()
+
+    def clear_checked(self) -> None:
+        self._checked.clear()
+        for item in self._items:
+            item.check.blockSignals(True)
+            item.check.setChecked(False)
+            item.check.blockSignals(False)
+        self._update_fusion_bar()
+
+    def checked(self) -> list[Dataset]:
+        return [d for d in self._datasets if d.path in self._checked]
+
+    def _update_fusion_bar(self) -> None:
+        n = len(self._checked)
+        self.fusion_bar.setVisible(n > 0)
+        self.fusion_label.setText(f"{n} coché{'s' if n > 1 else ''}" + ("" if n > 1 else " · coches-en un 2e"))
+        self.fusion_button.setEnabled(n > 1 and not self._building and self._blocked is None)
+
+    def _on_merge(self) -> None:
+        if len(self._checked) > 1:
+            self.merge_requested.emit(self.checked())
 
     def _details(self) -> QWidget:
         box = QWidget()
@@ -286,12 +350,14 @@ class DatasetPanel(QWidget):
             if ds.path not in self._thumbs:
                 img = thumbnail(ds)
                 self._thumbs[ds.path] = bgr_to_qimage(img) if img is not None else None
-            widget = DatasetItem(ds, self._thumbs[ds.path])
+            widget = DatasetItem(ds, self._thumbs[ds.path], ds.path in self._checked, self._on_check)
             item = QListWidgetItem(self.list)
             item.setSizeHint(QSize(0, THUMB_H + 18))
             self.list.setItemWidget(item, widget)
             self._items.append(widget)
         self.list.blockSignals(False)
+        self._checked &= {d.path for d in datasets}
+        self._update_fusion_bar()
         self.count.setText(f"{len(datasets)}" if datasets else "")
         self.list.setVisible(bool(datasets))
         self.empty.setVisible(not datasets)
@@ -320,6 +386,12 @@ class DatasetPanel(QWidget):
             self.selection_changed.emit(None)
             return
         self._frames = ds.frames()
+        self.slider.setEnabled(bool(self._frames))
+        if not self._frames:
+            self.frame_label.setText("—")
+            thumb = self._thumbs.get(ds.path)
+            self.preview.set_image(thumb)
+            self.preview.set_placeholder("Pas d'images (fusion)" if ds.fmt == "fusion" else "Aucune image")
         self.slider.blockSignals(True)
         self.slider.setRange(0, max(len(self._frames) - 1, 0))
         self.slider.setValue(len(self._frames) // 2)
@@ -334,6 +406,14 @@ class DatasetPanel(QWidget):
     def _fill_meta(self, ds: Dataset) -> None:
         m = self._meta_labels
         m["Format"].setText(FORMAT_LABELS.get(ds.fmt, ds.fmt))
+        if ds.fmt == "fusion":
+            merged, rejected = ds.meta.get("merged", []), ds.meta.get("rejected", [])
+            m["Durée"].setText("—")
+            m["Profondeur"].setText("sources : " + ", ".join(merged)
+                                    + (f"  ·  écartés : {', '.join(rejected)}" if rejected else ""))
+            info = ds.build_info() or {}
+            m["Modèle"].setText(size_label(info.get("size_mm", []), info.get("units", "mm")) if info else "—")
+            return
         duration = ds.meta.get("duration_s")
         dropped = ds.meta.get("dropped", 0)
         m["Durée"].setText((duration_label(duration) if duration else "—") +
@@ -376,8 +456,23 @@ class DatasetPanel(QWidget):
     def _on_build(self) -> None:
         if self._current is None:
             return
+        if self._current.fmt == "fusion":
+            self._redo_fusion(self._current)
+            return
         options = BuildOptions(self.profile_combo.currentData(), self.quality.value(), self.smoothing.isChecked())
         self.build_requested.emit(self._current, options)
+
+    def _redo_fusion(self, ds: Dataset) -> None:
+        sources, missing = [], []
+        for raw in ds.meta.get("sources", []):
+            try:
+                sources.append(load_dataset(Path(raw)))
+            except DatasetError:
+                missing.append(Path(raw).name)
+        if missing:
+            self.append_log(f"Sources introuvables : {', '.join(missing)}")
+        if len(sources) > 1:
+            self.merge_requested.emit(sources)
 
     def options_for(self, ds: Dataset) -> BuildOptions:
         return BuildOptions(ds.profile_id, self.quality.value(), self.smoothing.isChecked())
@@ -410,8 +505,11 @@ class DatasetPanel(QWidget):
         self.build_button.setVisible(not self._building)
         self.build_button.setEnabled(ds is not None and not self._building and blocked is None)
         self.build_button.setToolTip(blocked or "")
-        if ds is not None:
+        if ds is not None and ds.fmt == "fusion":
+            self.build_button.setText("Refaire la fusion")
+        elif ds is not None:
             self.build_button.setText("Reconstruire le modèle 3D" if ds.has_model else "Construire le modèle 3D")
+        self._update_fusion_bar()
         self.view_button.setEnabled(ds is not None and ds.has_model)
 
     def _open_folder(self) -> None:

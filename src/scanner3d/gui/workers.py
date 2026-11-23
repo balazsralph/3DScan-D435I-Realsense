@@ -20,12 +20,14 @@ from ..dataset import Dataset, DatasetError
 from ..depth import backproject, center_distance_m, colorize_depth, depth_overlay, distance_hint, valid_ratio
 from ..profiles import ScanProfile
 from ..reconstruction.extraction import ExtractionError
+from ..reconstruction.merge import merge_datasets
 from ..reconstruction.pipeline import BuildOptions, build_dataset
 from ..reconstruction.slam import Cancelled, DenseSlam, pick_device, prepare_frame
 
 log = logging.getLogger(__name__)
 CLOUD_EVERY_S = 0.12      # nuage de l'image courante : ~8 mises à jour par seconde
 LIVE_CLOUD_EVERY_S = 0.8  # modèle en cours : extraction plus coûteuse
+COVERAGE_EVERY_S = 0.15   # marqueurs de couverture sur l'image : ~6 par seconde
 STATS_EVERY_S = 0.5
 
 
@@ -202,9 +204,10 @@ class CameraWorker(QThread):
 
 
 class LiveReconWorker(QThread):
-    """Reconstruit en direct (GPU) pendant l'enregistrement, pour voir le modèle se remplir."""
+    """Reconstruit en direct (GPU) pendant l'enregistrement : modèle qui se remplit et couverture."""
 
     cloud_ready = Signal(object, object)     # points (repère 1re image), couleurs
+    coverage_ready = Signal(object, float)   # grille de couverture (ou None si suivi perdu), part bien couverte
     status = Signal(bool, float, int, int)   # suivi ok, fitness, images intégrées, décrochages
     failed = Signal(str)
 
@@ -212,10 +215,15 @@ class LiveReconWorker(QThread):
         super().__init__()
         self.profile, self.intrinsics, self.depth_max_m = profile, intrinsics, depth_max_m
         self.mailbox = Mailbox()
+        self.show_coverage = True          # nuage coloré par couverture plutôt qu'en couleurs réelles
         self._cloud_pending = False
+        self._coverage_pending = False
 
     def cloud_consumed(self) -> None:
         self._cloud_pending = False
+
+    def coverage_consumed(self) -> None:
+        self._coverage_pending = False
 
     def stop(self) -> None:
         self.mailbox.close()
@@ -228,14 +236,30 @@ class LiveReconWorker(QThread):
         except RuntimeError as exc:
             self.failed.emit(f"Aperçu en direct indisponible : {exc}")
             return
-        index, losses, last_cloud = 0, 0, 0.0
+        index, losses, last_cloud, last_coverage = 0, 0, 0.0, 0.0
+        good_ratio = 0.0
         while not self.mailbox.closed:
             item = self.mailbox.take()
             if item is None:
                 continue
-            color, depth = item
+            color, raw_depth = item
             try:
-                status = slam.process(*prepare_frame(color, depth, p, p.depth_scale, self.depth_max_m), index)
+                color_rgb, depth = prepare_frame(color, raw_depth, p, p.depth_scale, self.depth_max_m)
+                status = slam.process(color_rgb, depth, index)
+                now = time.monotonic()
+                if not self._coverage_pending and now - last_coverage >= COVERAGE_EVERY_S:
+                    last_coverage = now
+                    self._coverage_pending = True
+                    coverage = slam.coverage_map(depth) if status.accepted else None
+                    self.coverage_ready.emit(coverage, good_ratio)
+                if not self._cloud_pending and now - last_cloud >= LIVE_CLOUD_EVERY_S:
+                    last_cloud = now
+                    self._cloud_pending = True
+                    if self.show_coverage:
+                        points, colors, good_ratio = slam.extract_coverage_points(300_000)
+                    else:
+                        points, colors = slam.extract_points(300_000)
+                    self.cloud_ready.emit(points, colors)
             except RuntimeError as exc:
                 self.failed.emit(f"Aperçu en direct interrompu : {exc}")
                 return
@@ -243,11 +267,6 @@ class LiveReconWorker(QThread):
             if status.lost_streak == p.tracking.fragment_break_frames:
                 losses += 1
             self.status.emit(status.accepted, status.fitness, len(slam.indices), losses)
-            now = time.monotonic()
-            if not self._cloud_pending and now - last_cloud >= LIVE_CLOUD_EVERY_S:
-                last_cloud = now
-                self._cloud_pending = True
-                self.cloud_ready.emit(*slam.extract_points(300_000))
 
 
 class BuildWorker(QThread):
@@ -274,6 +293,36 @@ class BuildWorker(QThread):
             self.cancelled.emit()
         except (DatasetError, ExtractionError, ValueError, OSError, RuntimeError) as exc:
             log.exception("Échec de la construction")
+            self.failed.emit(str(exc))
+        else:
+            self.succeeded.emit(result)
+
+
+class MergeWorker(QThread):
+    """Fusionne plusieurs datasets (construit d'abord les modèles manquants)."""
+
+    progress = Signal(float, str)
+    message = Signal(str)
+    succeeded = Signal(object)    # MergeResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, datasets: list[Dataset], options: BuildOptions, root: Path) -> None:
+        super().__init__()
+        self.datasets, self.options, self.root = datasets, options, root
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            result = merge_datasets(self.datasets, self.options, self.root, self.progress.emit, self._cancel,
+                                    self.message.emit)
+        except Cancelled:
+            self.cancelled.emit()
+        except (DatasetError, ExtractionError, ValueError, OSError, RuntimeError) as exc:
+            log.exception("Échec de la fusion")
             self.failed.emit(str(exc))
         else:
             self.succeeded.emit(result)

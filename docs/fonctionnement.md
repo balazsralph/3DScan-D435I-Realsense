@@ -35,6 +35,40 @@
      horizontal le plus bas, « haut » déduit de la tenue de la caméra), sol posé à z = 0.
    - Lissage de Taubin (préserve le volume), export PLY + STL, `build.json`.
 
+## Couverture en direct (`reconstruction/coverage.py`)
+
+Chaque voxel de la TSDF compte ses observations (poids `uint16`, +1 par image intégrée). Toutes les
+0,15 s, le modèle est raycasté depuis la pose courante sur une grille de 53 × 30 points (un tous les
+16 pixels). Le poids de chaque point est interpolé sur les 8 voxels voisins (`index` × `interp_ratio`).
+Ce raycast prend environ 5 ms ; le facteur de sous-échantillonnage interne d'Open3D doit être mis à 1,
+sinon une grille aussi grossière ne renvoie rien. Niveaux : la caméra mesure mais le modèle est vide →
+à scanner ; < 12 observations → faible ; < 45 → partiel ; sinon bien vu.
+
+Pour le nuage 3D, la surface est extraite à trois seuils d'observations (1, 12, 45). Les extractions à
+seuil plus élevé sont des sous-ensembles exacts de la première, ce qui permet de colorer chaque point par
+simple comparaison de positions.
+
+## Fusion (`reconstruction/merge.py`)
+
+1. Les modèles manquants sont construits.
+2. Chaque modèle (en mètres, avec normales et couleurs) est recalé sur l'union des modèles déjà acceptés :
+   RANSAC sur FPFH puis ICP. Il faut au moins 25 % de recouvrement et un écart inférieur à 1,5 fois la
+   tolérance du recalage des morceaux.
+3. Les points sont réunis (sous-échantillonnage au voxel du profil) et une **reconstruction de Poisson**
+   donne une surface étanche. La profondeur de l'octree est choisie pour avoir des cellules un peu plus
+   fines que le voxel du scan. Les 4 % de sommets les moins soutenus par des mesures sont retirés, puis la
+   surface est recadrée sur la boîte englobante des points ; pour un objet, les petits morceaux isolés
+   sont retirés aussi.
+4. Le résultat est écrit dans `datasets/<date>_fusion/` (`fusion.json` liste les sources, ce qui permet
+   de refaire la fusion).
+
+## Export (`export.py`)
+
+STL et PLY restent dans les unités du modèle, z vers le haut, comme l'attendent les trancheurs et la CAO.
+OBJ et GLB sont convertis en mètres, y vers le haut (glTF et importeurs de Blender). Le GLB est écrit
+directement (glTF 2.0 binaire : `POSITION`, `NORMAL`, `COLOR_0`, indices `uint32`), car celui
+d'Open3D 0.20 perd les couleurs des sommets.
+
 ## Modes (`profiles.py`)
 
 | | Petit objet | Objet | Salle |
@@ -66,6 +100,7 @@ La reconstruction écrit uniquement dans `reconstruction/` et ne modifie jamais 
 - `workers.py` : threads caméra, reconstruction en direct et construction. Les images passent par
   « dernière valeur » : jamais d'empilement si l'affichage prend du retard.
 - `viewer3d.py` : vue VTK (nuage ou maillage, rendus couleur, relief et maillage, cotes).
+- `live_panel.py` : image caméra avec réticule, guidage, marqueurs de couverture et légende.
 - `start_screen.py`, `dataset_panel.py`, `live_panel.py`, `viewer_panel.py`, `widgets.py`, `theme.py`.
 
 ## Références

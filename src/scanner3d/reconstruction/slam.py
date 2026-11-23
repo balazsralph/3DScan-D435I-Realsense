@@ -19,6 +19,19 @@ import open3d.core as o3c
 from ..dataset import FramePair, Intrinsics, read_frame
 from ..depth import clean_depth
 from ..profiles import ScanProfile
+from .coverage import (
+    CELL_PX,
+    GOOD,
+    GOOD_MIN,
+    WEAK_MAX,
+    CoverageMap,
+    classify_cells,
+    coverage_from,
+    frame_valid_grid,
+    grid_shape,
+    level_colors,
+    point_levels,
+)
 
 ProgressFn = Callable[[float, str], None]
 PreviewFn = Callable[[np.ndarray, np.ndarray], None]
@@ -98,6 +111,7 @@ class DenseSlam:
                  depth_max_m: float, device: o3c.Device) -> None:
         self._profile, self._device = profile, device
         self._depth_scale, self._depth_max = depth_scale, depth_max_m
+        self._intrinsics = intr
         self.voxel_mm = voxel_mm
         self._pose = np.eye(4)            # pose de la dernière image acceptée
         self._velocity = np.eye(4)        # mouvement entre les deux dernières images acceptées
@@ -177,6 +191,42 @@ class DenseSlam:
         else:
             colors = np.full((len(points), 3), 200, np.uint8)
         return points, colors
+
+    def extract_coverage_points(self, max_points: int = 400_000) -> tuple[np.ndarray, np.ndarray, float]:
+        """Surface colorée par couverture (rouge : à repasser, ambre : partiel, vert : bien vu).
+
+        Renvoie (points, couleurs, part de la surface bien couverte).
+        """
+        def positions(threshold: float) -> np.ndarray:
+            pcd = self._model.extract_pointcloud(threshold)
+            return np.zeros((0, 3), np.float32) if pcd.is_empty() else pcd.point.positions.cpu().numpy()
+
+        everything = positions(1.0)
+        if len(everything) == 0:
+            return everything.astype(np.float32), np.zeros((0, 3), np.uint8), 0.0
+        levels = point_levels(everything, positions(float(WEAK_MAX)), positions(float(GOOD_MIN)),
+                              self.voxel_mm / 1000.0 * 0.01)
+        good_ratio = float(np.count_nonzero(levels == GOOD)) / len(levels)
+        step = max(1, math.ceil(len(everything) / max_points))
+        return everything[::step].astype(np.float32), level_colors(levels[::step]), good_ratio
+
+    def coverage_map(self, depth: np.ndarray, cell_px: int = CELL_PX) -> CoverageMap:
+        """Couverture vue depuis la pose courante, sur une grille posée sur l'image (`depth` : image préparée)."""
+        h, w = depth.shape
+        rows, cols = grid_shape(w, h, cell_px)
+        k = np.diag([cols / w, rows / h, 1.0]) @ self._intrinsics.matrix()
+        grid = self._model.voxel_grid
+        # range_map_down_factor = 1 : sur une grille aussi grossière, le facteur 8 par défaut ne renvoie rien
+        result = grid.ray_cast(self._model.frustum_block_coords, o3c.Tensor(k), o3c.Tensor(np.linalg.inv(self._pose)),
+                               cols, rows, ["depth", "index", "interp_ratio"], self._depth_scale,
+                               self._profile.depth_min_m, self._depth_max, 0.0,
+                               self._profile.tracking_trunc_multiplier, 1)
+        ratio = result["interp_ratio"]
+        weights = grid.attribute("weight").reshape((-1,)).to(o3c.float32)
+        weight_map = (weights[result["index"].reshape((-1,))].reshape(tuple(ratio.shape)) * ratio).sum(dim=2)
+        model_depth = result["depth"].cpu().numpy()[..., 0]
+        cells = classify_cells(weight_map.cpu().numpy(), model_depth, frame_valid_grid(depth, rows, cols))
+        return coverage_from(cells)
 
 
 class FrameLoader:

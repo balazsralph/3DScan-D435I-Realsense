@@ -129,3 +129,42 @@ def test_nice_date_is_french(tmp_path: Path) -> None:
     ds = load_dataset(record(tmp_path, 1))
     ds = type(ds)(**{**ds.__dict__, "created": datetime(2026, 11, 23, 14, 5)})
     assert nice_date(ds) == "23 nov. 2026 · 14:05"
+
+
+def test_fusion_bar_requests_merge_of_checked_datasets(app: QApplication, tmp_path: Path) -> None:
+    datasets = [load_dataset(record(tmp_path, 2)), load_dataset(record(tmp_path, 2)),
+                load_dataset(record(tmp_path, 2))]
+    panel = DatasetPanel()
+    panel.set_datasets(datasets)
+    requests: list = []
+    panel.merge_requested.connect(requests.append)
+    assert not panel.fusion_bar.isVisibleTo(panel)
+    panel._items[0].check.setChecked(True)
+    assert panel.fusion_bar.isVisibleTo(panel) and not panel.fusion_button.isEnabled()
+    panel._items[2].check.setChecked(True)
+    assert panel.fusion_button.isEnabled()
+    panel.set_datasets(datasets)  # rafraîchissement : les coches sont conservées
+    panel.fusion_button.click()
+    assert [d.path for d in requests[0]] == [datasets[0].path, datasets[2].path]
+    panel.clear_checked()
+    assert panel.checked() == [] and not panel.fusion_bar.isVisibleTo(panel)
+
+
+def test_live_view_paints_coverage(app: QApplication) -> None:
+    from scanner3d.reconstruction.coverage import GOOD, MISSING, PARTIAL, coverage_from
+
+    panel = LivePanel()
+    panel.set_profile(PROFILES["objet"])
+    panel.resize(900, 800)
+    image = bgr_to_qimage(np.full((480, 848, 3), 90, np.uint8))
+    panel.show_frames(image, image)
+    panel.set_stats(LiveStats(30.0, 0.9, "ok", "Distance idéale", True, 10, 0, 1.0))
+    grid = np.zeros((30, 53), np.uint8)
+    grid[:10], grid[10:20], grid[20:] = MISSING, PARTIAL, GOOD
+    panel.set_coverage(coverage_from(grid))
+    shot = panel.view.grab().toImage()
+    assert not shot.isNull()
+    panel.coverage_box.setChecked(False)
+    assert not panel.view.show_coverage
+    panel.set_recording(False)
+    assert panel.view.coverage is None

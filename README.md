@@ -6,10 +6,10 @@ coté en millimètres, prêt pour l'impression 3D ou la CAO.
 
 ```
 ┌──────────── Datasets ─────────────┬──────── Caméra en direct ────────┬────────── Aperçu 3D ───────────┐
-│ ▸ 23 nov. · Objet · 1676 img  ✓   │  ● Distance idéale (21 cm)       │                                │
-│ ▸ 22 nov. · Salle ·  940 img      │   ┌──────────────────────────┐   │      modèle qui se remplit     │
-│                                   │   │  couleur + profondeur    │   │      pendant le scan, puis     │
-│  [aperçu image par image]         │   └──────────────────────────┘   │      modèle final coté         │
+│ ☑ 23 nov. · Objet · 1676 img  ✓   │  ● Distance idéale (21 cm)       │              [Exporter ▾]      │
+│ ☑ 22 nov. · Objet ·  940 img  ✓   │   ┌──────────────────────────┐   │      modèle qui se remplit     │
+│ [ 2 cochés    Fusionner ]         │   │ ▲▲ ●● ●●●  couverture    │   │      (rouge → vert selon la    │
+│  [aperçu image par image]         │   └──────────────────────────┘   │      couverture), puis modèle  │
 │  Standard | Détaillé  ☑ Lissage   │   ┌──── profondeur ──────────┐   │                                │
 │  [ Construire le modèle 3D ]      │   └──────────────────────────┘   │  Couleur · Relief · Maillage   │
 │                                   │   ( ● )  00:42   1 268 img       │  Cotes · Iso · Dessus · Capture│
@@ -20,13 +20,18 @@ coté en millimètres, prêt pour l'impression 3D ou la CAO.
 
 - **Deux modes pensés pour leur sujet** : *Objet* (petit ≤ 10 cm ou moyen 10–60 cm) et *Salle entière*.
   Chacun règle la caméra (preset, unité de profondeur, portée, filtres) et la reconstruction.
-- **Reconstruction en direct** sur la carte graphique, affichée à droite de l'image caméra : tu vois tout
-  de suite ce qui manque.
+- **Reconstruction en direct** sur la carte graphique, affichée à droite de l'image caméra.
+- **Couverture en temps réel** : pendant l'enregistrement, une grille de marqueurs sur l'image caméra
+  montre ce qui reste à scanner (▲ rouge), ce qui est partiel (● ambre) et ce qui est bien vu (● vert) ;
+  le nuage 3D est coloré de la même façon pour repérer les zones à repasser sous tous les angles.
 - **Guidage à l'écran** : distance idéale, état du suivi, coupe du fond (plateau tournant).
 - **Datasets intégrés** : aperçu image par image, construction en un clic, historique des modèles et de
   leurs cotes.
+- **Fusion de datasets** depuis le panneau latéral : coche plusieurs scans (dessus puis dessous d'un objet
+  retourné, salle en plusieurs passages), ils sont recalés et réunis en une surface unique et étanche.
+- **Export en un clic** : STL (impression, CAO), OBJ et GLB (Blender, en mètres, couleurs comprises), PLY.
 - **Résultats utilisables directement** : objet isolé de son support, posé à plat et coté en mm ; salle
-  nettoyée et posée sur son sol. Exports **PLY** (couleurs) et **STL**.
+  nettoyée et posée sur son sol.
 - **Suivi robuste** : prédiction de mouvement, garde-fous, découpage en morceaux recalés quand la caméra
   décroche, correction de la dérive en fin de tour ([mesures](docs/precision.md)).
 
@@ -64,6 +69,8 @@ flowchart LR
     G -->|salle| I[Nettoyage,<br/>sol à z = 0]
     H --> J[PLY + STL]
     I --> J
+    J --> K[Fusion de plusieurs<br/>datasets, Poisson]
+    J --> L[Export STL · OBJ · GLB · PLY]
 ```
 
 Détails : [fonctionnement](docs/fonctionnement.md) · conseils : [guide de scan](docs/guide-de-scan.md) ·
@@ -78,7 +85,8 @@ src/scanner3d/
 ├── dataset.py, depth.py  datasets RGB-D, traitements de profondeur
 ├── presets/              presets caméra JSON
 ├── acquisition/          caméra RealSense, enregistrement
-├── reconstruction/       suivi, recalage, isolement, salle, chaîne complète
+├── export.py             export STL, OBJ, GLB (glTF), PLY
+├── reconstruction/       suivi, couverture, recalage, isolement, salle, fusion, chaîne complète
 └── gui/                  interface Qt (PySide6) et vue 3D (VTK/PyVista)
 tests/
 ├── unit/  integration/  gui/  helpers/
@@ -89,7 +97,7 @@ datasets/                 tes captures (non versionnées)
 ## Développement
 
 ```bash
-.venv/bin/python -m pytest            # 69 tests, dont un scan synthétique complet
+.venv/bin/python -m pytest            # 93 tests, dont des scans et une fusion synthétiques complets
 .venv/bin/ruff check src tests
 ```
 

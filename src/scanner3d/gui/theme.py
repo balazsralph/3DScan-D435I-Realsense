@@ -95,6 +95,16 @@ QPushButton#Ghost:hover {{ color: {TEXT}; background: {SURFACE_2}; border-color:
 QPushButton#Danger {{ background: transparent; border: 1px solid {RED_DIM}; color: {RED}; }}
 QPushButton#Danger:hover {{ background: {RED_DIM}; }}
 
+QToolButton#Export {{
+    background: {CYAN_DIM}; color: {CYAN}; border: 1px solid #1C5566; border-radius: {RADIUS_S}px;
+    padding: 6px 12px; font-weight: 700;
+}}
+QToolButton#Export:hover {{ background: #144252; }}
+QToolButton#Export:disabled {{ background: transparent; color: {FAINT}; border-color: {SURFACE_3}; }}
+QToolButton#Export::menu-indicator {{ image: none; }}
+QMenu {{ background: {SURFACE_2}; border: 1px solid {LINE}; padding: 6px; border-radius: {RADIUS_S}px; }}
+QMenu::item {{ padding: 7px 14px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {SURFACE_3}; }}
 QToolButton#Segment {{
     background: transparent; border: none; border-radius: {RADIUS_S - 2}px; padding: 5px 12px;
     color: {MUTED}; font-weight: 600;

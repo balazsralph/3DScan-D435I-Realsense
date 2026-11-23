@@ -18,6 +18,13 @@ comme un scan à la main). Le dataset passe ensuite par toute la chaîne.
 Sans aucun objet autour de la boîte (un seul objet sur un plan infini, cas dégénéré pour un suivi
 point-à-plan), la dérive passe de 350 mm / 44° à 94 mm / 11° grâce à la bande de suivi large.
 
+## Fusion de deux passages (test automatique)
+
+`tests/integration/test_merge.py` : deux passages synthétiques autour de la même boîte, à 32 cm et
+22 cm de hauteur, avec un départ décalé de 75°. Le second retrouve le premier à 100 % (écart de
+1,2 mm). Chaque passage seul donne environ 157 × 105 × 81 mm, et la surface fusionnée 156,9 × 106,6 ×
+82,6 mm (boîte de 150 × 100 × 80 mm). Durée totale : environ 12 s, construction des deux modèles comprise.
+
 ## Scan réel d'un petit objet (1676 images, à la main)
 
 | | Avant (réglages repris de scan3d) | Maintenant |

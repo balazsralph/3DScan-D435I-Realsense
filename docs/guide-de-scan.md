@@ -34,6 +34,21 @@ Le dessous de l'objet, posé sur le support, n'est pas scanné : le modèle est 
 Caméra fixe et objet qui tourne : baisse **« Fond coupé à »** juste derrière le plateau, pour que seuls
 l'objet et le plateau, qui tournent ensemble, soient vus. Sinon le décor immobile contredit le mouvement.
 
+## Couverture en direct : ce qui reste à scanner
+
+Pendant l'enregistrement (avec une carte NVIDIA), une grille de marqueurs se pose sur l'image caméra :
+
+| Marqueur | Signification | Que faire |
+|---|---|---|
+| ▲ rouge | la caméra voit une surface que le modèle n'a pas encore, ou presque pas | passer plus de temps sur cette zone |
+| ● ambre | surface vue quelques fois seulement | encore un passage |
+| ● vert | surface vue assez longtemps (≈ 1,5 s) | rien, c'est bon |
+
+La pastille en haut à droite donne la part de l'image à scanner et la part bien vue. Dans l'aperçu 3D,
+le modèle en cours prend les mêmes couleurs : fais-le tourner à la souris pour repérer les zones rouges
+ou les trous, puis va les filmer. La case **« Couverture en direct »** permet de revenir aux couleurs
+réelles.
+
 ## Mode Salle entière
 
 - Distance utile : 0,6 à 3 m (profondeur gardée jusqu'à 3,5 m), finesse 8 mm, unité 1 mm, laser au
@@ -42,6 +57,34 @@ l'objet et le plateau, qui tournent ensemble, soient vus. Sinon le décor immobi
 - Garde toujours du relief dans l'image : meubles, encadrements. Un mur blanc seul ne se suit pas.
 - Reviens à ton point de départ : la correction de dérive s'en sert pour refermer la boucle.
 - Le modèle est posé sur son sol (z = 0), en mètres.
+
+## Fusionner plusieurs datasets
+
+Utile pour **retourner un objet** et scanner son dessous, ou pour **compléter une salle** en plusieurs
+passages.
+
+1. Dans le panneau **Datasets**, coche les scans à réunir (case à gauche de chaque vignette).
+2. Clique sur **« Fusionner »**. Les modèles manquants sont construits, puis chaque modèle est recalé sur
+   le premier coché, sur la forme du sujet.
+3. Une surface unique et étanche est calculée (Poisson). Le résultat apparaît comme un nouveau dataset
+   « Fusion », qu'on peut exporter ou refaire.
+
+Un scan qui ne coïncide pas assez avec le premier est **écarté** (indiqué dans le journal) plutôt que de
+fausser le modèle. Pour un objet retourné, garde un peu de recouvrement entre les deux scans (les flancs).
+
+## Exporter le modèle
+
+Bouton **« Exporter ▾ »** en haut de l'aperçu 3D, quand un modèle est affiché :
+
+| Format | Pour | Unités · orientation | Couleurs |
+|---|---|---|---|
+| STL | impression 3D, CAO | mm (objet) · z vers le haut | non |
+| OBJ | Blender, Maya, 3ds Max | mètres · y vers le haut | oui |
+| GLB (glTF) | Blender, web, réalité augmentée | mètres · y vers le haut | oui |
+| PLY | MeshLab, CloudCompare | mm (objet) · z vers le haut | oui |
+
+Dans Blender : *Fichier → Importer → glTF 2.0* (ou *Wavefront OBJ*). L'objet arrive à sa vraie taille,
+debout, avec ses couleurs (attribut de couleur des sommets).
 
 ## Messages et solutions
 
@@ -53,6 +96,7 @@ l'objet et le plateau, qui tournent ensemble, soient vus. Sinon le décor immobi
 | Images perdues pendant l'enregistrement | disque trop lent | libérer de la place, disque plus rapide |
 | Caméra indisponible | câble, autre programme | rebrancher, fermer realsense-viewer, « Reconnecter la caméra » |
 | Sol non trouvé (salle) | sol peu visible | filmer davantage le sol en début de scan |
+| Fusion : dataset écarté | les scans ne se recouvrent pas assez, ou ne montrent pas le même sujet | refaire un scan avec plus de recouvrement |
 
 ## Où sont mes fichiers ?
 

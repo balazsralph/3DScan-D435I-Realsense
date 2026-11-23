@@ -3,8 +3,9 @@
 Formats reconnus :
 - scanner3d : `session.json` + `couleur/` + `profondeur/` (créé par cette application) ;
 - scan3d    : `intrinseques.json` + `couleur/` + `profondeur/` (projet ~/Desktop/scan3d) ;
-- open3d    : `camera_intrinsic.json` + `color/` + `depth/` (anciens scripts de ce dépôt,
-              profondeur en 0,1 mm comme le preset MediumDensityPreset-custom.json).
+- open3d    : `camera_intrinsic.json` + `color/` + `depth/` (format du système de reconstruction
+              d'Open3D, profondeur en 0,1 mm) ;
+- fusion    : `fusion.json` (modèle issu de la fusion de plusieurs datasets, sans images).
 La reconstruction est toujours écrite dans le sous-dossier `reconstruction/`, pour ne jamais
 écraser les fichiers produits par les autres outils.
 """
@@ -21,6 +22,7 @@ import cv2
 import numpy as np
 
 SESSION_FILE = "session.json"
+FUSION_FILE = "fusion.json"
 SCAN3D_FILE = "intrinseques.json"
 LEGACY_FILE = "camera_intrinsic.json"
 THUMBNAIL_FILE = "thumbnail.jpg"
@@ -156,7 +158,16 @@ def _load_legacy(path: Path) -> Dataset:
                    path / "color", path / "depth", None, {})
 
 
-_LOADERS = ((SESSION_FILE, _load_scanner3d), (SCAN3D_FILE, _load_scan3d), (LEGACY_FILE, _load_legacy))
+def _load_fusion(path: Path) -> Dataset:
+    meta = _read_json(path / FUSION_FILE)
+    if not isinstance(meta.get("sources"), list) or "profile" not in meta:
+        raise DatasetError(f"{path / FUSION_FILE} incomplet")
+    return Dataset(path, "fusion", str(meta["profile"]), Intrinsics(0, 0, 0.0, 0.0, 0.0, 0.0), 1000.0,
+                   _created(path, meta), path / "couleur", path / "profondeur", None, meta)
+
+
+_LOADERS = ((FUSION_FILE, _load_fusion), (SESSION_FILE, _load_scanner3d), (SCAN3D_FILE, _load_scan3d),
+            (LEGACY_FILE, _load_legacy))
 
 
 def is_dataset(path: Path) -> bool:
@@ -190,18 +201,19 @@ def discover(roots: list[Path]) -> tuple[list[Dataset], list[str]]:
     return sorted(found.values(), key=lambda d: d.created, reverse=True), errors
 
 
-def new_dataset_dir(root: Path, profile_id: str) -> Path:
-    """Nouveau dossier daté ; suffixe -2, -3... si deux sessions démarrent dans la même seconde."""
+def new_dataset_dir(root: Path, suffix: str, with_frames: bool = True) -> Path:
+    """Nouveau dossier daté `<date>_<suffixe>` ; -2, -3... si deux sessions démarrent dans la même seconde."""
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     root.mkdir(parents=True, exist_ok=True)
     for n in range(1, 100):
-        path = root / (f"{stamp}_{profile_id}" + (f"-{n}" if n > 1 else ""))
+        path = root / (f"{stamp}_{suffix}" + (f"-{n}" if n > 1 else ""))
         try:
             path.mkdir()
         except FileExistsError:
             continue
-        (path / "couleur").mkdir()
-        (path / "profondeur").mkdir()
+        if with_frames:
+            (path / "couleur").mkdir()
+            (path / "profondeur").mkdir()
         return path
     raise OSError(f"Impossible de créer un dossier de session dans {root}")
 

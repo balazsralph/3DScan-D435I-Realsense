@@ -200,14 +200,14 @@ def build_dataset(dataset: Dataset, options: BuildOptions, progress: Callable[[f
         frames_used=len(indices), frames_total=len(frames), fragments=len(fragments),
         fragments_merged=len(accepted), triangles=len(mesh.triangles), duration_s=round(time.monotonic() - t0, 1),
         device=str(device), voxel_mm=round(profile.voxel_mm, 3), timings_s=timings, warnings=tuple(warnings))
-    _write_build_info(out_dir, result, options)
+    write_build_info(out_dir, result, options)
     finish(1.0, "Modèle prêt")
     for warning in warnings:
         say(f"Attention : {warning}")
     return result
 
 
-def _write_build_info(out_dir: Path, result: BuildResult, options: BuildOptions) -> None:
+def write_build_info(out_dir: Path, result: BuildResult, options: BuildOptions) -> None:
     data = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(result).items()}
     data.update({"options": asdict(options), "built": datetime.now().isoformat(timespec="seconds"),
                  "units": "mm" if build_profile(options.profile_id).export_mm else "m"})

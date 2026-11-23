@@ -9,6 +9,7 @@ import open3d.core as o3c
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -24,7 +25,10 @@ from PySide6.QtWidgets import (
 from ..acquisition.camera import detect
 from ..acquisition.recorder import RecordingResult
 from ..dataset import Dataset, discover
+from ..export import FORMATS, ExportError, export_model
 from ..profiles import PROFILES, ScanProfile
+from ..reconstruction.coverage import CoverageMap
+from ..reconstruction.merge import MergeResult
 from ..reconstruction.pipeline import BuildOptions, BuildResult
 from ..reconstruction.slam import pick_device
 from .dataset_panel import DatasetPanel, nice_date, size_label
@@ -32,11 +36,12 @@ from .live_panel import LivePanel
 from .start_screen import StartScreen
 from .viewer_panel import ViewerPanel
 from .widgets import Chip, bgr_to_qimage
-from .workers import BuildWorker, CameraWorker, LiveReconWorker, LiveStats
+from .workers import BuildWorker, CameraWorker, LiveReconWorker, LiveStats, MergeWorker
 
 log = logging.getLogger(__name__)
 STOP_WAIT_MS = 4000
 CLOSE_WAIT_MS = 20_000  # à la fermeture : laisser l'écrivain vider sa file d'images sur le disque
+COVERAGE_HINT = "Rouge : à repasser · ambre : partiel · vert : bien vu"
 
 
 class MainWindow(QMainWindow):
@@ -50,7 +55,8 @@ class MainWindow(QMainWindow):
         self.profile: ScanProfile | None = None
         self.camera_worker: CameraWorker | None = None
         self.live_worker: LiveReconWorker | None = None
-        self.build_worker: BuildWorker | None = None
+        self.build_worker: BuildWorker | MergeWorker | None = None  # une seule tâche GPU à la fois
+        self._shown_dataset: Dataset | None = None
         self.intrinsics: object | None = None
         self.has_cuda = pick_device().get_type() == o3c.Device.DeviceType.CUDA
         self._first_live_cloud = True
@@ -120,6 +126,9 @@ class MainWindow(QMainWindow):
         self.live.view_mode_changed.connect(self._set_view_mode)
         self.live.depth_max_changed.connect(self._set_depth_max)
         self.viewer_panel.source_changed.connect(self._on_source)
+        self.viewer_panel.export_requested.connect(self._export)
+        self.datasets.merge_requested.connect(self.start_merge)
+        self.live.coverage_box.toggled.connect(self._on_coverage_toggled)
         return page
 
     # -- paramètres ---------------------------------------------------------------------------
@@ -272,6 +281,8 @@ class MainWindow(QMainWindow):
             return
         live = LiveReconWorker(self.profile, self.intrinsics, worker.depth_max_m)
         live.cloud_ready.connect(self._on_live_cloud)
+        live.coverage_ready.connect(self._on_live_coverage)
+        live.show_coverage = self.live.coverage_box.isChecked()
         live.status.connect(self._on_live_status)
         live.failed.connect(lambda msg: self.datasets.append_log(msg))
         self.live_worker = live
@@ -279,7 +290,9 @@ class MainWindow(QMainWindow):
         worker.live_sink = live.mailbox
         live.start()
         self.viewer_panel.set_source("direct")
-        self.viewer_panel.set_title("Reconstruction en direct", "Le modèle se remplit pendant que tu scannes.")
+        self.viewer_panel.set_export_enabled(False)
+        self.viewer_panel.set_title("Reconstruction en direct", COVERAGE_HINT if live.show_coverage else
+                                    "Le modèle se remplit pendant que tu scannes.")
 
     def _stop_live(self) -> None:
         live, self.live_worker = self.live_worker, None
@@ -296,8 +309,26 @@ class MainWindow(QMainWindow):
         if self.viewer_panel.source.value() == "direct":
             self.viewer.show_points(points, colors, reset_camera=self._first_live_cloud)
             self._first_live_cloud = False
-            self.viewer_panel.info.setText(f"{len(points):,} points".replace(",", " "))
+            if not live.show_coverage:
+                self.viewer_panel.info.setText(f"{len(points):,} points".replace(",", " "))
         live.cloud_consumed()
+
+    def _on_live_coverage(self, coverage: CoverageMap | None, model_good_ratio: float) -> None:
+        live = self.live_worker
+        if live is None or self.sender() is not live:
+            return
+        self.live.set_coverage(coverage)
+        if live.show_coverage and model_good_ratio > 0:
+            self.viewer_panel.set_title("Reconstruction en direct · couverture",
+                                        f"{COVERAGE_HINT}  ·  surface bien couverte : {model_good_ratio * 100:.0f} %")
+        live.coverage_consumed()
+
+    def _on_coverage_toggled(self, on: bool) -> None:
+        if self.live_worker is not None:
+            self.live_worker.show_coverage = on
+            self._first_live_cloud = False
+            if not on:
+                self.viewer_panel.set_title("Reconstruction en direct", "Le modèle se remplit pendant que tu scannes.")
 
     def _on_live_status(self, ok: bool, fitness: float, frames: int, losses: int) -> None:
         if ok:
@@ -354,6 +385,7 @@ class MainWindow(QMainWindow):
                 self._show_selected_model()
         else:
             self.viewer.clear_cloud()
+            self.viewer_panel.set_export_enabled(False)
             self._first_live_cloud = True
             live = self.camera_worker is not None
             self.viewer_panel.set_title("Nuage en direct" if live else "Direct",
@@ -363,6 +395,7 @@ class MainWindow(QMainWindow):
 
     def _show_selected_model(self) -> None:
         ds = self.datasets.current()
+        self.viewer_panel.set_export_enabled(False)
         if ds is None:
             self.viewer.show_message("Sélectionne un dataset à gauche.")
             self.viewer_panel.set_title("Modèle")
@@ -382,9 +415,13 @@ class MainWindow(QMainWindow):
             self.viewer.show_message(f"Modèle illisible : {exc}")
             return
         self.viewer_panel.set_model_dir(ds.reconstruction_dir)
+        self._shown_dataset = ds
+        self.viewer_panel.set_export_enabled(True)
         dims = size_label(info.get("size_mm", []), units) if info.get("size_mm") else ""
         detail = f"{triangles:,} triangles".replace(",", " ")
-        if info:
+        if info.get("merged"):
+            detail += f"  ·  fusion de {len(info['merged'])} datasets"
+        elif info:
             used = f"{info.get('frames_used')}/{info.get('frames_total')} images"
             detail += f"  ·  {used}  ·  voxel {info.get('voxel_mm')} mm"
         self.viewer_panel.set_title(f"Modèle  ·  {dims}" if dims else "Modèle", detail)
@@ -410,6 +447,7 @@ class MainWindow(QMainWindow):
         self.datasets.set_building(True)
         self.live.record.setEnabled(False)
         self.viewer_panel.set_source("modele")
+        self.viewer_panel.set_export_enabled(False)
         self.viewer.show_message("Construction en cours...\nLe modèle apparaîtra ici au fil du suivi.")
         self.viewer_panel.set_title("Construction en cours", nice_date(ds))
         worker.start()
@@ -445,6 +483,68 @@ class MainWindow(QMainWindow):
     def _on_build_cancelled(self) -> None:
         self.datasets.append_log("Construction annulée.")
         self.viewer.show_message("Construction annulée.")
+
+    # -- fusion --------------------------------------------------------------------------------
+    def start_merge(self, datasets: list[Dataset]) -> None:
+        if self.build_worker is not None:
+            return
+        if self.camera_worker is not None and self.live.record.isChecked():
+            QMessageBox.information(self, "Enregistrement en cours", "Termine l'enregistrement avant de fusionner.")
+            return
+        options = self.datasets.options_for(datasets[0])
+        worker = MergeWorker(datasets, options, self.datasets_root)
+        worker.progress.connect(self.datasets.set_progress)
+        worker.message.connect(self.datasets.append_log)
+        worker.succeeded.connect(self._on_merge_ok)
+        worker.failed.connect(self._on_build_failed)
+        worker.cancelled.connect(self._on_build_cancelled)
+        worker.finished.connect(self._on_build_thread_done)
+        self.build_worker = worker
+        self._save_settings()
+        self.datasets.set_building(True)
+        self.datasets.append_log(f"Fusion de {len(datasets)} datasets : {', '.join(d.name for d in datasets)}")
+        self.live.record.setEnabled(False)
+        self.viewer_panel.set_source("modele")
+        self.viewer_panel.set_export_enabled(False)
+        self.viewer.show_message("Fusion en cours...\nModèles manquants, recalage, puis surface unique.")
+        self.viewer_panel.set_title("Fusion en cours", f"{len(datasets)} datasets")
+        worker.start()
+
+    def _on_merge_ok(self, result: MergeResult) -> None:
+        sizes = " × ".join(f"{s:g}" for s in result.size_mm)
+        self.datasets.append_log(f"Fusion prête : {sizes} mm · {len(result.merged)} datasets · "
+                                 f"{result.duration_s:.0f} s")
+        if result.rejected:
+            self.datasets.append_log(f"Écartés (ne coïncident pas) : {', '.join(result.rejected)}")
+        self.datasets.clear_checked()
+        self.refresh_datasets(select=result.path)
+        current = self.datasets.current()
+        if current is not None and current.has_model:
+            self.show_model(current)
+
+    # -- export --------------------------------------------------------------------------------
+    def _export(self, fmt_id: str) -> None:
+        ds = self._shown_dataset
+        if ds is None or not ds.has_model:
+            return
+        fmt = FORMATS[fmt_id]
+        desktop = Path.home() / "Desktop"
+        start = (desktop if desktop.is_dir() else Path.home()) / f"{ds.name}.{fmt.id}"
+        path, _ = QFileDialog.getSaveFileName(self, f"Exporter en {fmt.label}", str(start),
+                                              f"{fmt.label} (*.{fmt.id})")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            written = export_model(ds.model_path, (ds.build_info() or {}).get("units", "mm"), Path(path), fmt_id)
+        except ExportError as exc:
+            QMessageBox.warning(self, "Export impossible", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        units = "m, y vers le haut" if fmt.meters else "unités du modèle"
+        self.datasets.append_log(f"Exporté en {fmt.label} ({units}) : {written}")
+        self.viewer_panel.info.setText(f"Exporté : {written}")
 
     def _on_build_thread_done(self) -> None:
         self.build_worker = None

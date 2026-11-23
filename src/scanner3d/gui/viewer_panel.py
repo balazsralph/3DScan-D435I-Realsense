@@ -5,8 +5,19 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
+from ..export import FORMATS
 from . import theme
 from .viewer3d import RENDER_MODES, Viewer3D
 from .widgets import SegmentedControl
@@ -14,6 +25,7 @@ from .widgets import SegmentedControl
 
 class ViewerPanel(QWidget):
     source_changed = Signal(str)  # "direct" ou "modele"
+    export_requested = Signal(str)  # identifiant du format (stl, obj, glb, ply)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,6 +48,7 @@ class ViewerPanel(QWidget):
         head.addStretch(1)
         self.source = SegmentedControl([("direct", "Direct"), ("modele", "Modèle")])
         self.source.changed.connect(self.source_changed)
+        self._export_slot = head
         head.addWidget(self.source)
         root.addLayout(head)
 
@@ -57,6 +70,19 @@ class ViewerPanel(QWidget):
         self.bounds.toggled.connect(self.viewer.set_bounds_visible)
         tools.addWidget(self.bounds)
         tools.addStretch(1)
+        self.export_button = QToolButton()
+        self.export_button.setText("Exporter  ▾")
+        self.export_button.setObjectName("Export")
+        self.export_button.setToolTip("Exporter le modèle affiché (STL, OBJ, GLB, PLY)")
+        self.export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu = QMenu(self.export_button)
+        for fmt in FORMATS.values():
+            action = menu.addAction(f"{fmt.label}  —  {fmt.usage}")
+            action.triggered.connect(lambda _=False, f=fmt.id: self.export_requested.emit(f))
+        self.export_button.setMenu(menu)
+        self.export_button.setEnabled(False)
+        self._export_slot.insertWidget(self._export_slot.count() - 1, self.export_button)
         for label, tip, slot in (("Iso", "Vue isométrique", self.viewer.reset_view),
                                  ("Dessus", "Vue de dessus", self.viewer.view_top),
                                  ("Capture", "Enregistrer une image de la vue 3D", self._screenshot)):
@@ -81,6 +107,9 @@ class ViewerPanel(QWidget):
 
     def set_model_dir(self, folder: Path | None) -> None:
         self._model_dir = folder
+
+    def set_export_enabled(self, enabled: bool) -> None:
+        self.export_button.setEnabled(enabled)
 
     def _screenshot(self) -> None:
         default = (self._model_dir or Path.home()) / f"apercu_{datetime.now():%Y%m%d_%H%M%S}.png"
