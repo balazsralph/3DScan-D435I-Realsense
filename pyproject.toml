@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scanner3d"
+version = "2.0.0"
+description = "Scanner 3D pour Intel RealSense D435i : capture guidée, aperçu 3D en direct, reconstruction TSDF"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "open3d>=0.18",
+    "pyrealsense2>=2.54",
+    "PySide6>=6.6",
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5"]
+
+[project.scripts]
+scanner3d = "scanner3d.__main__:main"
+
+[tool.setuptools]
+packages = ["scanner3d", "scanner3d.gui"]
+
+[tool.setuptools.package-data]
+scanner3d = ["presets/*.json"]
+
+[tool.ruff]
+line-length = 120
+include = ["scanner3d/**/*.py", "tests/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
+ignore = ["N999"]  # le dossier racine (ancien __init__.py) porte un nom avec tirets
+
+[tool.ruff.lint.per-file-ignores]
+"scanner3d/gui/*.py" = ["N802"]  # noms imposés par Qt (paintEvent, sizeHint...)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: nécessite Open3D (CPU ou CUDA), plus lent"]
